@@ -792,79 +792,44 @@ ALLOWED_EXTENSIONS = {
 }
 
 BLOCKED_EXTENSIONS = {'exe','com','scr','vbs','bat','cmd','ps1','msi','dll','sys',
-                      'pif','application','gadget','hta','cpl','msc','jar','ws','wsf','wsh'}
+                      'pif','application','gadget','hta','cpl','msc'}
 
-# ─── Dangerous code patterns — comprehensive threat detection ───────────────
+# Only block clear real threats
 DANGEROUS_PATTERNS = [
-    # ── Telegram file-theft bots (matches main__3_.py style) ──
-    (r'api\.telegram\.org/bot[A-Za-z0-9:_-]{20,}', '⚠️ Telegram bot token hardcoded in file'),
-    (r'bot\.send_document\s*\(|sendDocument\s*\(', '⚠️ Telegram file-send function (exfiltration risk)'),
-    (r'bot\.send_message\s*\(.*ADMIN_ID|sendMessage.*chat_id', '⚠️ Telegram C2 messaging pattern'),
-    (r'telebot\s*\.\s*TeleBot\s*\(|telegram\.ext.*Application', '⚠️ Telegram bot library initialised — potential C2'),
-    # ── Mass file harvesting & ZIP-bomb to Telegram (file-theft bot pattern) ──
-    (r'os\.walk\s*\(.*\).*\.py|get_all_py_files|scan_directory.*py', '🚨 Mass .py file harvesting pattern'),
-    (r'zipfile\.ZipFile.*os\.walk|ZipFile.*zipf\.write.*os\.walk', '🚨 Mass zip-and-send exfiltration'),
-    (r'backup_all|python_backup|full_python_backup|zip_buffer.*BytesIO.*ZipFile', '🚨 Backup-and-send pattern'),
-    (r'scan_current|scan_home|scan_root|scan_custom|scan_directory', '🚨 File system scanning bot pattern'),
-    (r'send_document.*chat\.id.*zip_buffer|send_document.*message\.chat', '🚨 Direct file exfil via Telegram'),
-    (r'find_config|config\*\.py|settings\*\.json|\*\.env.*os\.walk', '🚨 Config/secret file hunting pattern'),
-    # ── Remote command execution / RAT ──
-    (r'exec\s*\(base64\.b64decode', '🚨 Base64-encoded exec (obfuscated payload)'),
-    (r'__import__\s*\(\s*["\']os["\']\s*\)\.system', '🚨 Dynamic os.system call'),
-    (r'socket\.connect.*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}.*(?:4444|1337|9999|31337)', '🚨 Raw reverse-shell socket'),
-    (r'Popen.*shell=True.*PIPE.*stdin|popen.*|.*PIPE.*communicate', '⚠️ Shell injection with pipe'),
-    (r'eval\s*\(\s*(?:compile|input|request)', '🚨 Dynamic eval with user/net input'),
-    # ── Credential & sensitive file access ──
-    (r'/etc/passwd|/etc/shadow|\.ssh/id_rsa|\.bash_history|\.aws/credentials', '🚨 Sensitive system file access'),
-    (r'SECRET_KEY\s*=\s*["\'][^"\']{10,}|DATABASE_URL\s*=\s*["\']|API_KEY\s*=\s*["\'][A-Za-z0-9]{20,}', '⚠️ Hardcoded secret/credential'),
-    (r'ipapi\.co|ip-api\.com|checkip\.amazonaws|api\.ipify', '⚠️ IP geolocation/fingerprinting call'),
-    # ── Web shell patterns ──
-    (r'system\s*\(\s*\$_(?:GET|POST|REQUEST)|passthru\s*\(\s*\$_', '🚨 PHP web shell pattern'),
-    (r'eval\s*\(\s*base64_decode\s*\(\s*\$_|eval\s*\(\s*gzinflate', '🚨 PHP obfuscated web shell'),
-    (r'<\?php.*system\s*\(|<\?php.*exec\s*\(', '🚨 PHP command execution'),
-    # ── Process/system abuse ──
-    (r'subprocess\.getoutput\s*\(\s*["\']whoami|subprocess.*getoutput.*id\b', '⚠️ whoami/id system recon'),
-    (r'security_dump|backup_and_send|data_exfil|steal_files', '🚨 Known malware function name'),
-    (r'reverse_shell|rev_shell|bind_shell|meterpreter', '🚨 Known shell payload keyword'),
+    (r'system\s*\(\s*\$_(?:GET|POST|REQUEST)|passthru\s*\(\s*\$_', 'PHP web shell'),
+    (r'eval\s*\(\s*base64_decode\s*\(\s*\$_|eval\s*\(\s*gzinflate', 'PHP obfuscated shell'),
+    (r'exec\s*\(base64\.b64decode\s*\(', 'Base64 exec payload'),
+    (r'socket\.connect.*(?:4444|1337|31337)', 'Reverse shell socket'),
+    (r'reverse_shell|bind_shell|meterpreter', 'Shell payload keyword'),
 ]
 
-# ── Extra check: file-theft bot fingerprint (structural, not just regex) ────
 FILE_THEFT_BOT_SIGNATURES = [
-    # matches bots with ALL THREE: TeleBot init + os.walk + send_document
-    {'name': '🚨 File-theft Telegram bot (full fingerprint)',
-     'require_all': [r'TeleBot\s*\(|telegram\.Bot\s*\(', r'os\.walk\s*\(', r'send_document|sendDocument']},
-    # matches bots scanning root/home directories
-    {'name': '🚨 System directory scanner bot',
-     'require_all': [r'TeleBot\s*\(|telegram\.Bot\s*\(', r"['\"](?:/home|/var|/opt|/etc)['\"]", r'os\.walk\s*\(']},
+    {'name': 'File-theft bot (Telegram + os.walk + send_document)',
+     'require_all': [
+         r'TeleBot\s*\(|telegram\.Bot\s*\(',
+         r'os\.walk\s*\(',
+         r'send_document|sendDocument'
+     ]},
 ]
 
 def scan_file_content(filepath):
-    """
-    Deep-scan uploaded file for malicious patterns.
-    Returns list of human-readable threat descriptions found.
-    """
     threats = []
     try:
         ext = os.path.splitext(filepath)[1].lower().lstrip('.')
-        if ext not in ('py','js','php','sh','bash','rb','ts','jsx','tsx','txt','json','html','htm'):
+        if ext not in ('py','js','php','sh','bash','html','htm'):
             return []
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read(500_000)   # cap at 500 KB
-
-        # ── Pattern-based scan ──
+            content = f.read(300_000)
         for pattern, desc in DANGEROUS_PATTERNS:
             try:
                 if re.search(pattern, content, re.IGNORECASE | re.DOTALL):
                     threats.append(desc)
             except re.error:
                 pass
-
-        # ── Structural fingerprint scan (multi-pattern AND logic) ──
         for sig in FILE_THEFT_BOT_SIGNATURES:
             if all(re.search(p, content, re.IGNORECASE | re.DOTALL) for p in sig['require_all']):
                 if sig['name'] not in threats:
                     threats.append(sig['name'])
-
     except Exception:
         pass
     return threats
@@ -2584,18 +2549,14 @@ function setProcStatus(running){
 // ═══════════════════════════════════════════════════════════════════════════
 
 function terminalBannerHTML(tid){
-  return `<div style="line-height:1.5;margin-bottom:8px;user-select:none">
-  <div style="font-family:'Fira Code',monospace;font-size:16px;font-weight:900;letter-spacing:3px;
-    background:linear-gradient(90deg,#a855f7,#00bfff,#a855f7);-webkit-background-clip:text;
-    -webkit-text-fill-color:transparent;margin-bottom:3px">▪ 𝙴𝙻𝙼𝙾𝙳𝙼𝙴𝙽 ▪</div>
-  <div style="color:#a855f7;font-family:monospace;font-size:11px">╔══════════════════════════════════════════╗</div>
-  <div style="color:#a855f7;font-family:monospace;font-size:11px">║  🚀 <span style="color:#00ffff;font-weight:700">𝙴𝙻𝙼𝙾𝙳𝙼𝙴𝙽</span>  SERVER HUB v2.0 — @I_tt_6  ║</div>
-  <div style="color:#a855f7;font-family:monospace;font-size:11px">╚══════════════════════════════════════════╝</div>
-  <div style="color:#00ff41;font-family:monospace;font-size:12px;margin-top:5px">┌──(<span style="color:#ff3399;font-weight:700">runner</span>㉿<span style="color:#00bfff">serverhub</span>)-[<span style="color:#ffff00">~</span>]</div>
-  <div style="color:#00ff41;font-family:monospace;font-size:12px">└─<span style="color:#ff3399;font-weight:700">$</span> <span style="color:#c9d1d9">👋 الترمنال #${tid} جاهز — العربي والإنجليزي مدعومان ✓</span></div>
+  return `<div style="font-family:'Fira Code',monospace;font-size:11px;color:#00ff41;line-height:1.6;margin-bottom:6px;user-select:none">
+  <span style="background:linear-gradient(90deg,#a855f7,#00bfff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:13px;font-weight:900;letter-spacing:2px">ELMODMEN</span>  <span style="color:#555;font-size:10px">SERVER HUB v2.0 · @I_tt_6</span>
+  <br>
+  <span style="color:#ff3399">┌──(runner㉿serverhub)-[~]</span>
+  <br>
+  <span style="color:#ff3399">└─$</span> <span style="color:#666;font-size:10px">terminal #${tid} ready</span>
 </div>`;
 }
-
 function buildTerminalEl(tid){
   const wrap = document.createElement('div');
   wrap.id = `term-wrap-${tid}`;
@@ -2612,37 +2573,33 @@ function buildTerminalEl(tid){
     if(inp) inp.focus();
   });
 
-  // fixed kali prompt footer inside box
+  // fixed prompt footer
   const footer = document.createElement('div');
   footer.id = `term-footer-${tid}`;
-  footer.style.cssText = 'color:#00ff41;font-family:monospace;font-size:12px;margin-top:6px;pointer-events:none;user-select:none;border-top:1px solid #1a1a2e;padding-top:4px';
-  footer.innerHTML = `┌──(<span style="color:#ff3399;font-weight:700">runner</span>㉿<span style="color:#00bfff">serverhub</span>)-[<span style="color:#ffff00" id="cwd-footer-${tid}">~</span>]<br>└─<span style="color:#ff3399;font-weight:700">$</span>`;
+  footer.style.cssText = 'color:#00ff41;font-family:monospace;font-size:11px;margin-top:4px;pointer-events:none;user-select:none';
+  footer.innerHTML = `┌──(<span style="color:#ff3399">runner</span>㉿<span style="color:#00bfff">serverhub</span>)-[<span style="color:#ffff00" id="cwd-footer-${tid}">~</span>]<br>└─<span style="color:#ff3399">$</span>`;
   box.appendChild(footer);
 
-  // input row
+  // input row — clean, no duplicate prompt above input
   const cmdRow = document.createElement('div');
   cmdRow.className = 'cmd-input';
-  cmdRow.style.marginTop = '6px';
+  cmdRow.style.marginTop = '4px';
   cmdRow.innerHTML = `
-    <div style="width:100%">
-      <div style="color:#00ff41;font-family:monospace;font-size:11px;padding:3px 0 2px;pointer-events:none;white-space:nowrap">
-        ┌──(<span style="color:#ff3399;font-weight:700">runner</span>㉿<span style="color:#00bfff">serverhub</span>)-[<span style="color:#ffff00" id="cwd-input-${tid}">~</span>]<br>
-        └─<span style="color:#ff3399;font-weight:700;font-size:13px">$</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px">
-        <input id="cmd-field-${tid}"
-          dir="auto" lang="ar,en" inputmode="text"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          placeholder="اكتب أمر عربي أو إنجليزي..."
-          style="flex:1;background:none;border:0;outline:0;color:var(--text);padding:8px 0;
-                 font-family:'Fira Code',monospace;font-size:13px;direction:ltr;unicode-bidi:embed"
-          onkeydown="termKeyDown(event,'${tid}')">
-        <button onclick="termRunCmd('${tid}')"
-          style="padding:5px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;
-                 color:var(--accent2);cursor:pointer;font-size:12px;flex-shrink:0">↵</button>
-      </div>
-    </div>`;
-
+    <div style="display:flex;align-items:center;gap:4px;width:100%">
+      <span style="color:#00ff41;font-family:monospace;font-size:11px;white-space:nowrap;pointer-events:none">
+        ┌──(<span style="color:#ff3399">runner</span>㉿<span style="color:#00bfff">serverhub</span>)-[<span style="color:#ffff00" id="cwd-input-${tid}">~</span>]<br>&nbsp;└─<span style="color:#ff3399">$</span>
+      </span>
+      <input id="cmd-field-${tid}"
+        dir="auto" lang="ar,en" inputmode="text"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        placeholder="..."
+        style="flex:1;background:none;border:0;outline:0;color:var(--text);padding:6px 0;
+               font-family:'Fira Code',monospace;font-size:13px;direction:ltr;unicode-bidi:embed"
+        onkeydown="termKeyDown(event,'${tid}')">
+      <button onclick="termRunCmd('${tid}')" title="Enter"
+        style="padding:4px 10px;background:var(--bg3);border:1px solid var(--border2);border-radius:5px;
+               color:var(--accent2);cursor:pointer;font-size:11px;flex-shrink:0">↵</button>
+    </div>`
   wrap.appendChild(box);
   wrap.appendChild(cmdRow);
   return wrap;
